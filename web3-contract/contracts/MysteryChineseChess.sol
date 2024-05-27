@@ -12,8 +12,8 @@ contract MysteryChineseChess is Ownable {
     uint8 public constant BLACK = 1;
 
     //? "indexed" keyword should be with address param?
-    event NewRoomCreated(string gameName, address creator);
-    event NewGameStarted(string gameName, address player1, address player2);
+//    event NewRoomCreated(string gameName, address creator);
+//    event NewGameStarted(string gameName, address player1, address player2);
     event GameEnded(string gameName, address winner, address loser);
 
     enum GameStatus {PENDING, STARTED, ENDED}
@@ -28,10 +28,27 @@ contract MysteryChineseChess is Ownable {
         Soldier // pawn
     }
 
-    struct Player {
-        address playerAddress;
-        string playerName;
-        bool inRoom;
+    struct Room {
+        uint256 number; // a.k.a. index
+        address[2] players; // should be accessed using the constants 'BLACK', 'RED'
+        uint8 hostIndex;
+        uint256 stake;
+        uint24 gameDuration;
+
+        // TODO: may allow audiences to join
+    }
+
+    struct Match {
+        uint256 id;
+        uint256 roomNumber;
+//        string name;
+        GameStatus gameStatus;
+        PlayerPiece[9][10] board;
+        address[2] players; // should be accessed using the constants 'BLACK', 'RED'
+        uint256 stake;
+        uint256 startTimestamp;
+        uint256 endTimestamp;
+        // TODO: add necessary timestamps & validate actions based on them
     }
 
     struct PlayerPiece {
@@ -40,14 +57,10 @@ contract MysteryChineseChess is Ownable {
         bool unfolded; // 2 purposes: identify if a piece has moved or not; decide rule of its next move (comply with the rule of which Piece)
     }
 
-    struct Match {
-        uint256 id;
-        string name;
-        GameStatus gameStatus;
-        PlayerPiece[9][10] board;
-        address[2] players; // should be accessed using the constants 'BLACK', 'RED'
-        uint8 hostIndex;
-        // TODO: add necessary timestamps & validate actions based on them
+    struct Player {
+        address playerAddress;
+        string playerName;
+        uint256 roomNumber; // Store a reference to the room that player is currently in (0 if not in any room)
     }
 
     struct Position {
@@ -55,7 +68,10 @@ contract MysteryChineseChess is Ownable {
         uint8 column;
     }
 
-    mapping(address => uint256) public playerIndexes;
+    /* State variables */
+
+    mapping(address => uint256) public playerIndexes; // player's address => player's index
+//    mapping(uint256 => uint256) public roomIndexes;
     mapping(uint256 => uint256) public matchIndexes; // game's id => game's index (of 'matches' array)
     /**
      * May use this to understand piece moves sent from client.
@@ -64,6 +80,7 @@ contract MysteryChineseChess is Ownable {
     mapping(string => uint8) internal letterToIndex;
 
     Player[] public players;
+    Room[] public rooms;
     Match[] public matches;
     /**
      * Use this to identify a piece based on its original position.
@@ -74,16 +91,20 @@ contract MysteryChineseChess is Ownable {
 //    string public baseURI;
 //    uint public totalSupply;
 
-    // modifiers
+    /**/
+
+    /* Modifiers */
+
     modifier matchExists(uint256 matchId) {
         require(matches[matchIndexes[matchId]].id != 0, "The match does not exist");
         _;
     }
 
-    modifier joiningMatch(uint256 matchId) {
+    modifier joiningRoom(uint256 matchId) {
         require(isPlayer(_msgSender()), string.concat(_msgSender(), " is not player"));
 
-        Player[2] memory _players = matches[matchIndexes[matchId]].players;
+        Match memory _match = matches[matchIndexes[matchId]];
+        Player[2] memory _players = _match.players;
 
         require(matches[matchIndexes[matchId]].id != 0, "The match does not exist");
         require(_msgSender() == _players[0] || _msgSender() == _players[1], "You are not participating in this game");
@@ -95,15 +116,20 @@ contract MysteryChineseChess is Ownable {
 //        _;
 //    }
 
+    /**/
+
     constructor() payable Ownable(_msgSender()) {
         _initialize();
+        _initializeOriginalPieces();
     }
 
     function _initialize() private {
         PlayerPiece[9][10] memory emptyBoard;
 
+        rooms.push(Room(0, [address(0), address(0)], 0, 0, MAX_GAME_DURATION));
+        matches.push(Match(0, 0, GameStatus.ENDED, emptyBoard, [address(0), address(0)], 0, 0, 0));
         players.push(Player(address(0), "", false));
-        matches.push(Match(0, "", GameStatus.ENDED, emptyBoard, [address(0), address(0)]));
+
         letterToIndex['A'] = 0;
         letterToIndex['B'] = 1;
         letterToIndex['C'] = 2;
@@ -113,6 +139,9 @@ contract MysteryChineseChess is Ownable {
         letterToIndex['G'] = 6;
         letterToIndex['H'] = 7;
         letterToIndex['I'] = 8;
+    }
+
+    function _initializeOriginalPieces() private {
         originalPieces[0][0] = Piece.Chariot;
         originalPieces[0][8] = Piece.Chariot;
         originalPieces[9][0] = Piece.Chariot;
@@ -145,7 +174,19 @@ contract MysteryChineseChess is Ownable {
         originalPieces[6][8] = Piece.Soldier;
     }
 
-    /* Views */
+    /* External Views */
+
+    function getAllRooms() external view returns (Room[] memory) {
+        return rooms;
+    }
+
+//    function getAllMatches() external view returns (Match[] memory) {
+//        return matches;
+//    }
+
+    function getMatch(uint256 id) external view returns (Match memory) {
+        return matches[matchIndexes[id]];
+    }
 
     function getAllPlayers() external view returns (Player[] memory) {
         return players;
@@ -159,54 +200,32 @@ contract MysteryChineseChess is Ownable {
         return playerIndexes[_addr] != 0;
     }
 
-    function getAllMatches() external view returns (Match[] memory) {
-        return matches;
-    }
-
-    function getMatch(uint256 id) external view returns (Match memory) {
-        return matches[matchIndexes[id]];
-    }
-
     /**/
 
-    function createNewRoom(string calldata name) external payable returns (Match memory newMatch) {
-        uint256 matchId = uint256(keccak256(abi.encodePacked(_msgSender(), block.timestamp, name)));
-        PlayerPiece[10][9] memory emptyBoard;
-        newMatch = Match(matchId, name, GameStatus.PENDING, emptyBoard, [_msgSender(), address(0)]);
-
-        matchIndexes[matchId] = matches.length;
-        matches.push(newMatch);
-
-        return newMatch;
-    }
-
     // Team color is not a concern in this function, so elements of Match.players are accessed using number directly.
-    function joinRoom(uint256 matchId) external payable matchExists(matchId) {
-        uint256 currentMatchIndex = matchIndexes[matchId];
-        Match memory currentMatch = matches[currentMatchIndex];
+    function joinRoom(uint256 roomNumber) external {
+        Room memory _room = rooms[roomNumber];
 
-        require(currentMatch.players[0] == address(0) || currentMatch.players[1] == address(0), "The room is full");
+        require(_room.number != 0, "Room does not exist");
+        require(_room.players[0] == address(0) || _room.players[1] == address(0), "The room is full");
 
-        // Remove empty room and revert action
-        if (currentMatch.players[0] == address(0) && currentMatch.players[1] == address(0)) {
-            _removeRoom(matchId);
-            delete matchIndexes[currentMatchIndex];
-
-            revert("The room has been removed");
+        // Reset empty room's data if there's no player is in
+        if (_room.players[0] == address(0) && _room.players[1] == address(0)) {
+            _resetRoomInfo(roomNumber);
         }
 
-        if (currentMatch.players[0] == address(0)) {
-            currentMatch.players[0] = _msgSender();
+        if (_room.players[0] == address(0)) {
+            rooms[roomNumber].players[0] = _msgSender();
         } else {
-            currentMatch.players[1] = _msgSender();
+            rooms[roomNumber].players[1] = _msgSender();
         }
 
-        players[playerIndexes[_msgSender()]].inRoom = true;
+        players[playerIndexes[_msgSender()]].roomNumber = roomNumber;
     }
 
     // TODO: handle the case when game has started
-    function exitRoom(uint256 matchId) external payable joiningMatch(matchId) {
-        Match _match = matches[matchIndexes[matchId]];
+    function exitRoom(uint256 roomNumber) external joiningRoom(roomNumber) {
+        Match _match = matches[matchIndexes[roomNumber]];
         uint8 currentPlayerIndex = _match.players[0] == _msgSender() ? 0 : 1;
         uint8 remainingPlayerIndex = currentPlayerIndex == 0 ? 1 : 0;
 
@@ -225,32 +244,44 @@ contract MysteryChineseChess is Ownable {
 
             players[playerIndexes[_msgSender()]].inRoom = false;
         } else {
-            // Remove room if no player left
-            _removeRoom(matchId);
+            // Reset room's data if no player resides
+            _resetRoomInfo(roomNumber);
         }
     }
 
     // Free players in the room (if exists any) before removing
-    function _removeRoom(uint256 matchId) private {
-        uint256 matchIndex = matchIndexes[matchId];
+    function _resetRoomInfo(uint256 roomNumber) private {
+        Room memory _room = rooms[roomNumber];
 
-        if (matches[matchIndex].players[0] != address(0)) {
-            players[playerIndexes[matches[matchIndex].players[0]]].inRoom = false;
+        if (_room.players[0] != address(0)) {
+            players[rooms[roomNumber].players[0]].roomNumber = 0;
         }
 
-        if (matches[matchIndex].players[1] != address(0)) {
-            players[playerIndexes[matches[matchIndex].players[1]]].inRoom = false;
+        if (_room.players[1] != address(0)) {
+            players[rooms[roomNumber].players[1]].roomNumber = 0;
         }
 
         // Replace position of last match with position of current match in the 'matches' array
-        matches[matchIndex] = matches[matches.length - 1];
+
+        _room = matches[matches.length - 1];
         matchIndexes[matches[matches.length - 1].id] = matchIndex;
-        // then pop() the last element (a.k.a. currentMatch)
+        // then remove the last element (a.k.a. currentMatch)
         matches.pop();
         delete matchIndexes[matchIndex];
     }
 
-    function startGame(uint256 matchId) external payable joiningMatch(matchId) {
+    function startNewMatch(string calldata name) external returns (Match memory newMatch) {
+        uint256 matchId = uint256(keccak256(abi.encodePacked(_msgSender(), block.timestamp, name)));
+        PlayerPiece[10][9] memory emptyBoard;
+        newMatch = Match(matchId, name, GameStatus.PENDING, emptyBoard, [_msgSender(), address(0)]);
+
+        matchIndexes[matchId] = matches.length;
+        matches.push(newMatch);
+
+        return newMatch;
+    }
+
+    function startGame(uint256 matchId) external payable joiningRoom(matchId) {
         Match memory _match = matches[matchIndexes[matchId]];
 
         require(_match.id != 0, "The match does not exist");
@@ -350,16 +381,17 @@ contract MysteryChineseChess is Ownable {
     }
 
     function move(uint8 sourceRow, uint8 sourceCol, uint8 destRow, uint8 destCol) external payable returns (bool) {
-        // TODO: implement this
+        // TODO: implement this in next version
         return true;
     }
 
     function requestToDraw(uint256 matchId) external payable {
-
+        // TODO: implement this in next version
+        revert();
     }
 
     function surrender(uint256 matchId) external payable {
-
+        // TODO: implement this in next version
+        revert();
     }
-
 }

@@ -1,6 +1,6 @@
 {
   "name": "web3-learn",
-  "packageManager": "yarn@4.1.1",
+  "packageManager": "yarn@4.2.2",
   "scripts": {
     "compile": "solcjs --bin --abi --include-path node_modules/ --base-path ./contracts -o ./contracts contracts/MysteryChineseChess.sol"
   },
