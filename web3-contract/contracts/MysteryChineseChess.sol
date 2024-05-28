@@ -6,7 +6,7 @@ import "hardhat/console.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 contract MysteryChineseChess is Ownable {
-    uint32 public constant MAX_GAME_DURATION = 20 * 60 * 1000; // 20 minutes at maximum for any match
+    uint24 public constant MAX_GAME_DURATION = 30 * 60 * 1000; // 30 minutes at maximum by default for each player
     // Represent color of piece; use this constant to retrieve players in a game
     uint8 public constant RED = 0;
     uint8 public constant BLACK = 1;
@@ -34,7 +34,7 @@ contract MysteryChineseChess is Ownable {
         uint8 hostIndex;
         uint256 stake;
         uint24 gameDuration;
-
+        bool inGame;
         // TODO: may allow audiences to join
     }
 
@@ -95,18 +95,23 @@ contract MysteryChineseChess is Ownable {
 
     /* Modifiers */
 
+    modifier roomExists(uint32 roomNumber) {
+        require(rooms[roomNumber].number != 0, "Room does not exist");
+        _;
+    }
+
     modifier matchExists(uint256 matchId) {
         require(matches[matchIndexes[matchId]].id != 0, "The match does not exist");
         _;
     }
 
-    modifier joiningRoom(uint256 matchId) {
-        require(isPlayer(_msgSender()), string.concat(_msgSender(), " is not player"));
+    modifier joiningRoom(uint256 roomNumber) {
+        require(isPlayer(_msgSender()), string.concat("Unknown player with address ", _msgSender()));
+        require(rooms[roomNumber].number != 0, "Room does not exist");
 
-        Match memory _match = matches[matchIndexes[matchId]];
-        Player[2] memory _players = _match.players;
+        Room memory _room = rooms[roomNumber];
+        Player[2] memory _players = _room.players;
 
-        require(matches[matchIndexes[matchId]].id != 0, "The match does not exist");
         require(_msgSender() == _players[0] || _msgSender() == _players[1], "You are not participating in this game");
         _;
     }
@@ -126,7 +131,7 @@ contract MysteryChineseChess is Ownable {
     function _initialize() private {
         PlayerPiece[9][10] memory emptyBoard;
 
-        rooms.push(Room(0, [address(0), address(0)], 0, 0, MAX_GAME_DURATION));
+        rooms.push(Room(0, [address(0), address(0)], 0, 0, MAX_GAME_DURATION, false));
         matches.push(Match(0, 0, GameStatus.ENDED, emptyBoard, [address(0), address(0)], 0, 0, 0));
         players.push(Player(address(0), "", false));
 
@@ -172,6 +177,15 @@ contract MysteryChineseChess is Ownable {
         originalPieces[6][4] = Piece.Soldier;
         originalPieces[6][6] = Piece.Soldier;
         originalPieces[6][8] = Piece.Soldier;
+    }
+
+    /**
+     * Create 20 rooms
+     */
+    function _initializeRooms() private {
+        for (uint8 i = 1; i <= 20; i++) {
+            rooms.push(Room(i,  [address(0), address(0)], 0, 0, MAX_GAME_DURATION, false));
+        }
     }
 
     /* External Views */
