@@ -5,11 +5,9 @@ const ONE_GWEI: bigint = 1_000_000_000n;
 
 const MysteryChineseChessModule = buildModule("MysteryChineseChessModule", (m) => {
   // const unlockTime = m.getParameter("unlockTime", JAN_1ST_2030);
-  const lockedAmount = m.getParameter("lockedAmount", ONE_GWEI);
+  // const lockedAmount = m.getParameter("lockedAmount", ONE_GWEI);
 
-  const contract = m.contract("MysteryChineseChess", [], {
-    value: lockedAmount,
-  });
+  const contract = m.contract("MysteryChineseChess", []);
 
   return { contract };
 });

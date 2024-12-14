@@ -1,21 +1,39 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.20;
+pragma solidity ~0.8.20;
 
 // Uncomment this line to use console.log
 import "hardhat/console.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
+// import "./StringUtils.library.sol";
 
 contract MysteryChineseChess is Ownable {
-    uint24 public constant MAX_GAME_DURATION = 30 * 60 * 1000; // 30 minutes at maximum by default for each player
+    /**
+     * Set a 30-minute time control at maximum and by default for each player.
+     * Unit: millisecond
+     */
+    uint24 public constant MAX_TIME_CONTROL = 30 * 60 * 1000 /*milliseconds*/;
     // Represent color of piece; use this constant to retrieve players in a game
     uint8 public constant RED = 0;
     uint8 public constant BLACK = 1;
 
     //? "indexed" keyword should be with address param?
-    event NewPlayer(address _address, string name);
-    event NewTableCreated(uint256 id, string name, address hostAddress);
-    event NewGameStarted(string gameName, address player1, address player2);
-    event MatchEnded(uint256 matchId, MatchResult matchResult, address winner, address loser);
+    event NewPlayer(Player player);
+    event UpdatedPlayerInfo(address playerAddress);
+    event NewTableCreated(Table table);
+    event JoinedTable(address playerAddress, uint256 tableId);
+    event UpdatedTable(Table table);
+    event UpdatedTableId(uint256 oldTableId, uint256 newTableId);
+    event ExitedTable(address playerAddress, uint256 tableId);
+    event NewMatchStarted(uint256 matchId, address[2] players);
+    event MatchEnded(Match _match);
+    event OfferingDraw(uint256 matchId, address playerAddress);
+    event ApprovedDrawOffer(uint256 matchId, address playerAddress);
+    event DeclinedDrawOffer(uint256 matchId, address playerAddress);
+
+    error Unauthorized();
+    error ResourceNotFound(string message);
+    error InvalidAction(string message);
 
     enum Piece {
         None,
@@ -31,7 +49,9 @@ contract MysteryChineseChess is Ownable {
     enum GameMode {
         None,
         Bot,
-        Normal, // PvP
+        Beginner,
+        Intermediate,
+        Advanced,
         Rank
     }
 
@@ -53,15 +73,22 @@ contract MysteryChineseChess is Ownable {
         ////
         // Draw reasons //
         Stalemate,
+        Draw, // requires auto-detection and also both players to approve
         /* Require index of the player had offered */
-        OfferToDraw
+        OfferToDraw // requires both players to approve
         ////
+    }
+
+    enum Vote {
+        None,
+        Approve,
+        Decline
     }
 
     struct Player {
         address playerAddress;
         string playerName;
-        uint32 elo;
+        int32 elo;
         uint256 tableId; // Store a reference to the table that player is currently in (0 if not in any table)
     }
 
@@ -74,7 +101,7 @@ contract MysteryChineseChess is Ownable {
          * Index of the 'players' array; equals either 0 or 1.
          */
         uint8 hostIndex;
-        uint256 stake;
+        uint32 stake;
         uint24 timeControl;
         uint256 matchId; // 0 if game hasn't started, and > 0 otherwise
         // TODO: may allow audiences to join
@@ -82,14 +109,27 @@ contract MysteryChineseChess is Ownable {
 
     struct MatchResult {
         uint8 winnerIndex;
+        uint8 offererIndex;
         MatchResultType resultType;
-        uint8 increasingElo;
-        uint8 decreasingElo;
+        uint32 increasingElo;
+        uint32 decreasingElo;
     }
 
     struct Position {
-        uint8 row;
-        uint8 column;
+        uint8 y;
+        uint8 x;
+    }
+
+    struct MoveDetails {
+        uint8 playerIndex;
+        Position oldPosition;
+        Position newPosition;
+        uint256 timestamp;
+    }
+
+    struct Move {
+        MoveDetails details;
+        string[2] signatures;
     }
 
     struct PlayerPiece {
@@ -103,14 +143,14 @@ contract MysteryChineseChess is Ownable {
         GameMode gameMode;
         //        uint256 tableId;
         address[2] players; // should be accessed using the constants 'BLACK', 'RED'
-        uint256 stake;
+        uint32 stake;
         uint24 timeControl;
         uint256 startTimestamp;
         uint256 endTimestamp;
-        MatchStatus gameStatus;
+        MatchStatus matchStatus;
         MatchResult matchResult;
         PlayerPiece[9][10] board;
-        Position[2][] steps;
+        Move[] moves;
     }
 
     /* State variables */
@@ -118,9 +158,17 @@ contract MysteryChineseChess is Ownable {
     Player[] public players;
     mapping(address => uint256) public playerIndexes; // player's address => player's index
     Table[] public tables;
-    mapping(GameMode => uint256[]) public typeTableMapping;
+    uint256[] public normalModeBeginnerTableIndexes;
+    uint256[] public normalModeIntermediateTableIndexes;
+    uint256[] public normalModeAdvancedTableIndexes;
+    uint256[] public rankModeTableIndexes;
     Match[] public matches;
-    //    mapping(uint256 => uint256) public matchIndexes; // game's id => game's index (of 'matches' array)
+    mapping(uint256 => uint256) public matchIndexes; // match's ID => match's index (of 'matches' array)
+    /**
+     * Store votes of matches that have players offering draw.
+     * Match's ID => array of votes
+     */
+    mapping(uint256 => Vote[]) public drawVotes;
 
     /**
      * May use this to understand piece moves sent from client.
@@ -145,45 +193,73 @@ contract MysteryChineseChess is Ownable {
     /* Modifiers */
 
     modifier playerExists() {
-        require(this.isPlayer(_msgSender()), "You are not player");
+        if (!this.isPlayer(_msgSender())) {
+            revert Unauthorized();
+        }
+
         _;
     }
 
-    modifier playerAddrExists(address addr) {
-        require(this.isPlayer(addr), "This is not player");
-        _;
-    }
+    // modifier playerAddrExists(address addr) {
+    //     require(this.isPlayer(addr), "This is not player");
+    //     _;
+    // }
 
     modifier tableExists(uint256 tableId) {
-        require(tables[tableId].id != 0, "Table does not exist");
+        if (tables[tableId].id == 0) {
+            revert ResourceNotFound("Table does not exist");
+        }
+
         _;
     }
 
     modifier matchExists(uint256 matchId) {
-        require(matches[matchId].id != 0, "The match does not exist");
+        if (matchIndexes[matchId] == 0) {
+            revert ResourceNotFound("The match does not exist");
+        }
+
         _;
     }
 
     modifier joiningTable(uint256 tableId) {
-        require(this.isPlayer(_msgSender()), "You are not player");
-        _;
-        require(tables[tableId].id != 0, "Table does not exist");
+        if (!this.isPlayer(_msgSender())) {
+            revert Unauthorized();
+        }
+
+        if (tables[tableId].id == 0) {
+            revert ResourceNotFound("Table does not exist");
+        }
 
         Table memory _table = tables[tableId];
         address[2] memory _playerAddresses = _table.players;
 
-        require(
-            _msgSender() == _playerAddresses[0] ||
-                _msgSender() == _playerAddresses[1],
-            "You are not in this table"
-        );
+        if (
+            _msgSender() != _playerAddresses[0] &&
+            _msgSender() != _playerAddresses[1]
+        ) {
+            revert InvalidAction("You are not in this table");
+        }
+
         _;
     }
 
-    //    modifier matchExists(uint256 matchId) {
-    //        require(matches[matchIndexes[matchId]].id != 0, "The match does not exist");
-    //        _;
-    //    }
+    modifier joiningMatch(uint256 matchId) {
+        if (matchIndexes[matchId] == 0) {
+            revert ResourceNotFound("The match does not exist");
+        }
+
+        Match memory _match = matches[matchIndexes[matchId]];
+        address[2] memory _playerAddresses = _match.players;
+
+        if (
+            _msgSender() != _playerAddresses[0] &&
+            _msgSender() != _playerAddresses[1]
+        ) {
+            revert InvalidAction("You are not joining this match");
+        }
+
+        _;
+    }
 
     /**/
 
@@ -196,7 +272,7 @@ contract MysteryChineseChess is Ownable {
 
     function _initialize() private {
         PlayerPiece[9][10] memory emptyBoard;
-        Position[2][] memory emptySteps;
+        Move[] memory emptySteps;
 
         players.push(Player(address(0), "", 0, 0));
         tables.push(
@@ -212,7 +288,7 @@ contract MysteryChineseChess is Ownable {
                 0,
                 0,
                 MatchStatus.Ended,
-                MatchResult(0, MatchResultType.None, 0, 0),
+                MatchResult(0, 2, MatchResultType.None, 0, 0),
                 emptyBoard,
                 emptySteps
             )
@@ -231,6 +307,8 @@ contract MysteryChineseChess is Ownable {
     }
 
     function _initializeOriginalPieces() private {
+        originalPieces[0][4] = Piece.General;
+        originalPieces[9][4] = Piece.General;
         originalPieces[0][0] = Piece.Chariot;
         originalPieces[0][8] = Piece.Chariot;
         originalPieces[9][0] = Piece.Chariot;
@@ -263,14 +341,25 @@ contract MysteryChineseChess is Ownable {
         originalPieces[6][8] = Piece.Soldier;
     }
 
-    //    /**
-    //     * Create 20 tables
-    //     */
-    //    function _initializeTables() private {
-    //        for (uint8 i = 1; i <= 20; i++) {
-    //            tables.push(Table(i, [address(0), address(0)], 0, 0, MAX_GAME_DURATION, false));
-    //        }
-    //    }
+    /**
+     * Create 20 tables
+     */
+    function initializeTables() external payable onlyOwner {
+        for (uint8 i = 1; i <= 20; i++) {
+            tables.push(
+                Table(
+                    uint256(i),
+                    GameMode.Rank,
+                    string.concat("Room ", Strings.toString(uint256(i))),
+                    [address(0), address(0)],
+                    0,
+                    0,
+                    0,
+                    0
+                )
+            );
+        }
+    }
 
     /* External Views */
 
@@ -278,15 +367,23 @@ contract MysteryChineseChess is Ownable {
         return players;
     }
 
-    function getAllPlayersByDescendingRank()
-        external
-        view
-        returns (Player[50] memory _players)
-    {}
+    // function getAllPlayersByDescendingRank()
+    //     external
+    //     view
+    //     returns (Player[] memory _players)
+    // {
 
-    function getPlayer(
-        address _addr
-    ) external view playerAddrExists(_addr) returns (Player memory) {
+    // }
+
+    function getPlayer(address _addr) external view returns (Player memory) {
+        if (!this.isPlayer(_addr)) {
+            revert ResourceNotFound("Player does not exist");
+        }
+
+        return players[playerIndexes[_addr]];
+    }
+
+    function _getPlayer(address _addr) internal view returns (Player storage) {
         return players[playerIndexes[_addr]];
     }
 
@@ -301,17 +398,65 @@ contract MysteryChineseChess is Ownable {
     function getMatch(
         uint256 id
     ) external view matchExists(id) returns (Match memory) {
-        return matches[id];
+        return matches[matchIndexes[id]];
     }
 
     function getAllTables(
-        GameMode gameMode
-    ) external view returns (Table[] memory _tables) {
+        GameMode gameMode,
+        uint24 page,
+        uint16 size
+    ) external view returns (Table[] memory) {
+        Table[] memory _returnedTables = new Table[](size);
+
         if (gameMode == GameMode.None) {
-            return tables;
+            for (
+                uint256 i = (page - 1) * size;
+                i < (page - 1) * size + size;
+                i++
+            ) {
+                if (i == tables.length) {
+                    break;
+                }
+
+                _returnedTables[i] = tables[i];
+            }
+
+            return _returnedTables;
         }
 
-        // TODO: emplement pagination
+        uint256[] storage tableIndexes = _getTableIndexesByGameMode(gameMode);
+
+        for (
+            uint256 i = (page - 1) * size;
+            i < (page - 1) * size + size - 1;
+            i++
+        ) {
+            console.log(i);
+
+            if (i >= tableIndexes.length) {
+                break;
+            }
+
+            _returnedTables[i] = tables[tableIndexes[i]];
+        }
+
+        return _returnedTables;
+    }
+
+    function _getTableIndexesByGameMode(
+        GameMode gameMode
+    ) private view returns (uint256[] storage tableIndexes) {
+        if (gameMode == GameMode.Beginner) {
+            tableIndexes = normalModeBeginnerTableIndexes;
+        } else if (gameMode == GameMode.Intermediate) {
+            tableIndexes = normalModeIntermediateTableIndexes;
+        } else if (gameMode == GameMode.Advanced) {
+            tableIndexes = normalModeAdvancedTableIndexes;
+        } else if (gameMode == GameMode.Rank) {
+            tableIndexes = rankModeTableIndexes;
+        } else {
+            revert InvalidAction("Invalid GameMode");
+        }
     }
 
     function getTable(
@@ -324,93 +469,209 @@ contract MysteryChineseChess is Ownable {
 
     /* Main logics */
 
-  function registerPlayer(string memory _name) external {
-    require(!this.isPlayer(_msgSender()), "Player already registered"); // Require that player is not already registered
-    
-    uint256 _id = players.length;
-    players.push(Player(_msgSender(), _name, 0, 0)); // Add player to players array
-    playerIndexes[_msgSender()] = _id; // Create player's address - index mapping
+    function registerPlayer(string calldata _name) external {
+        require(!this.isPlayer(_msgSender()), "Player already registered"); // Require that player is not already registered
 
-    
-    emit NewPlayer(_msgSender(), _name); // Emits NewPlayer event
-  }
+        if (bytes(_name).length == 0) {
+            revert InvalidAction("Name cannot be empty");
+        }
+
+        uint256 _id = players.length;
+        Player memory _player = Player(_msgSender(), _name, 0, 0);
+        players.push(_player); // Add player to players array
+        playerIndexes[_msgSender()] = _id; // Create player's address - index mapping
+
+        emit NewPlayer(_player);
+    }
+
+    function updatePlayer(
+        string calldata playerName,
+        uint256 tableId,
+        bool setsTableId
+    ) external playerExists {
+        Player storage s_player = players[playerIndexes[_msgSender()]];
+
+        if (
+            (bytes(playerName).length > 0) &&
+            keccak256(abi.encodePacked(playerName)) !=
+            keccak256(abi.encodePacked(s_player.playerName))
+        ) {
+            s_player.playerName = playerName;
+        }
+
+        if (setsTableId) {
+            s_player.tableId = tableId;
+        }
+
+        emit UpdatedPlayerInfo(_msgSender());
+    }
 
     function createTable(
         GameMode gameMode,
         string calldata name,
-        uint256 stake
+        uint32 stake
     ) external {
-        tables.push(
-            Table({
-                id: tables.length,
-                gameMode: gameMode,
-                name: name,
-                players: [_msgSender(), address(0)],
-                hostIndex: 0,
-                stake: stake,
-                timeControl: 20 * 60,
-                matchId: 0
-            })
-        );
-        Table memory _table = tables[tables.length];
-        this.getPlayer(_msgSender()).tableId = _table.id;
+        uint256 tableId = tables.length;
+        Table memory _table = Table({
+            id: tableId,
+            gameMode: gameMode,
+            name: name,
+            players: [_msgSender(), address(0)],
+            hostIndex: 0,
+            stake: stake,
+            timeControl: MAX_TIME_CONTROL,
+            matchId: 0
+        });
 
-        // typeTableMapping[gameMode].push(_table);
+        tables.push(_table);
+        _getPlayer(_msgSender()).tableId = tableId;
+
+        if (gameMode == GameMode.Beginner) {
+            normalModeBeginnerTableIndexes.push(tableId);
+        } else if (gameMode == GameMode.Intermediate) {
+            normalModeIntermediateTableIndexes.push(tableId);
+        } else if (gameMode == GameMode.Advanced) {
+            normalModeAdvancedTableIndexes.push(tableId);
+        } else if (gameMode == GameMode.Rank) {
+            rankModeTableIndexes.push(tableId);
+        } else {
+            revert InvalidAction("Invalid GameMode. Cannot create table");
+        }
+
+        emit NewTableCreated(_table);
+    }
+
+    function updateTable(
+        uint256 tableId,
+        string memory name,
+        uint24 timeControl,
+        uint32 stake
+    ) external tableExists(tableId) {
+        Table storage s_table = tables[tableId];
+
+        if (
+            (bytes(name).length > 0) &&
+            keccak256(abi.encodePacked(name)) !=
+            keccak256(abi.encodePacked(s_table.name))
+        ) {
+            s_table.name = name;
+        }
+
+        if ((stake > 0) && (stake != s_table.stake)) {
+            s_table.stake = stake;
+        }
+
+        if ((timeControl > 0) && (timeControl != s_table.timeControl)) {
+            s_table.timeControl = timeControl;
+        }
+
+        emit UpdatedTable(s_table);
     }
 
     // Team color is not a concern in this function, so elements of Match.players are accessed using number directly.
     function joinTable(uint256 tableId) external tableExists(tableId) {
-        Table memory _table = tables[tableId];
+        Table storage table = tables[tableId];
+        uint8 emptySlot = 2;
 
-        require(_table.id != 0, "Table does not exist");
-        require(
-            _table.players[0] == address(0) || _table.players[1] == address(0),
-            "The table is full"
-        );
-
-        // Remove table if there's no player is in
-        if (
-            _table.players[0] == address(0) && _table.players[1] == address(0)
-        ) {
-            _removeTable(tableId);
-
-            revert("The table is not found");
+        if (table.players[1] == address(0)) {
+            emptySlot = 1;
         }
 
-        if (_table.players[0] == address(0)) {
-            tables[tableId].players[0] = _msgSender();
-        } else {
-            tables[tableId].players[1] = _msgSender();
+        if (table.players[0] == address(0)) {
+            emptySlot = 0;
         }
 
-        this.getPlayer(_msgSender()).tableId = tableId;
+        if (emptySlot == 2) {
+            revert InvalidAction("The table is full");
+        }
+
+        table.players[emptySlot] = _msgSender();
+        _getPlayer(_msgSender()).tableId = tableId;
+
+        if (table.players[0] == address(0) && table.players[1] == address(0)) {
+            table.hostIndex = 0;
+        }
+
+        emit JoinedTable(_msgSender(), tableId);
     }
 
-    // TODO: handle the case when game has started
+    /**
+     * Allow requesting player to exit current table.
+     */
     function exitTable(uint256 tableId) external joiningTable(tableId) {
-        Table memory _table = tables[tableId];
-        uint8 currentPlayerIndex = (_table.players[0] == _msgSender()) ? 0 : 1;
+        _getPlayer(_msgSender()).tableId = 0;
+
+        Table storage table = tables[tableId];
+        uint8 currentPlayerIndex = (table.players[0] == _msgSender()) ? 0 : 1;
         uint8 remainingPlayerIndex = 1 - currentPlayerIndex;
 
-        this.getPlayer(_msgSender()).tableId = 0;
-
         // If there's 1 player left, assign that player to index 0 and transfer table ownership
-        if (_table.players[remainingPlayerIndex] != address(0)) {
+        if (table.players[remainingPlayerIndex] != address(0)) {
             if (remainingPlayerIndex == 1) {
                 // -> currentPlayerIndex = 0
-                _table.players[currentPlayerIndex] = _table.players[
+                table.players[currentPlayerIndex] = table.players[
                     remainingPlayerIndex
                 ];
                 remainingPlayerIndex = 0;
             }
 
-            _table.players[1 - remainingPlayerIndex] = address(0);
+            table.players[1 - remainingPlayerIndex] = address(0);
             // Transfer host role to the remaining player and leave
-            _table.hostIndex = remainingPlayerIndex;
+            table.hostIndex = remainingPlayerIndex;
         } else {
             // Remove table if no player reside
+            console.log(
+                string.concat(
+                    "player.tableId = ",
+                    Strings.toString(_getPlayer(_msgSender()).tableId)
+                ),
+                ". Start to delete table"
+            );
             _removeTable(tableId);
         }
+
+        emit ExitedTable(_msgSender(), tableId);
+    }
+
+    /**
+     * Allow requesting player to exit current table.
+     */
+    function _exitTable(uint256 tableId) private joiningTable(tableId) {
+        console.log("(inside) Start exitTable function");
+        _getPlayer(_msgSender()).tableId = 0;
+
+        Table storage table = tables[tableId];
+        uint8 currentPlayerIndex = (table.players[0] == _msgSender()) ? 0 : 1;
+        uint8 remainingPlayerIndex = 1 - currentPlayerIndex;
+        console.log("(inside) retrieved table data in exitTable function");
+
+        // If there's 1 player left, assign that player to index 0 and transfer table ownership
+        if (table.players[remainingPlayerIndex] != address(0)) {
+            if (remainingPlayerIndex == 1) {
+                // -> currentPlayerIndex = 0
+                table.players[currentPlayerIndex] = table.players[
+                    remainingPlayerIndex
+                ];
+                remainingPlayerIndex = 0;
+            }
+
+            table.players[1 - remainingPlayerIndex] = address(0);
+            // Transfer host role to the remaining player and leave
+            table.hostIndex = remainingPlayerIndex;
+        } else {
+            // Remove table if no player reside
+            console.log(
+                string.concat(
+                    "player.tableId = ",
+                    Strings.toString(_getPlayer(_msgSender()).tableId)
+                ),
+                ". Start to delete table"
+            );
+            _removeTable(tableId);
+        }
+        console.log("(inside) Ended exitTable function");
+
+        emit ExitedTable(_msgSender(), tableId);
     }
 
     // Free players in the table (if exists any) before removing
@@ -419,56 +680,99 @@ contract MysteryChineseChess is Ownable {
 
         for (uint8 i = 0; i <= 1; i++) {
             if (_table.players[i] != address(0)) {
-                this.getPlayer(tables[tableId].players[i]).tableId = 0;
+                _getPlayer(_table.players[i]).tableId = 0;
+                console.log(
+                    string.concat(
+                        "(in loop) Player ",
+                        Strings.toString(i),
+                        " has tableId changed to ",
+                        Strings.toString(_getPlayer(_table.players[i]).tableId)
+                    )
+                );
             }
         }
 
         // Put the last element in "tables" array to position of the target table
-        _table = tables[tables.length - 1];
+
+        if (_table.gameMode == GameMode.Beginner) {
+            normalModeBeginnerTableIndexes.pop();
+        } else if (_table.gameMode == GameMode.Intermediate) {
+            normalModeIntermediateTableIndexes.pop();
+        } else if (_table.gameMode == GameMode.Advanced) {
+            normalModeAdvancedTableIndexes.pop();
+        } else if (_table.gameMode == GameMode.Rank) {
+            rankModeTableIndexes.pop();
+        }
+
+        uint256 oldTableId = tables.length - 1;
+
+        console.log("Mostly done");
+
+        // if this table is also the last element, just simply pop() and stop this process
+        if (oldTableId == tableId) {
+            tables.pop();
+            console.log("Done!");
+
+            return;
+        }
+
+        _table = tables[oldTableId];
         tables[tableId] = _table;
-        this.getPlayer(_table.players[0]).tableId = tableId;
-        this.getPlayer(_table.players[1]).tableId = tableId;
+        _getPlayer(_table.players[0]).tableId = tableId;
+        _getPlayer(_table.players[1]).tableId = tableId;
+
+        emit UpdatedTableId(oldTableId, tableId);
+
         // then remove the last element/table
         tables.pop();
     }
 
-    function startNewMatch(
-        uint256 tableId
-    ) external payable joiningTable(tableId) returns (Match memory newMatch) {
-        Table memory _table = tables[this.getPlayer(_msgSender()).tableId];
+    function startNewMatch(uint256 tableId) external joiningTable(tableId) {
+        Table storage table = tables[tableId];
 
-        require(
-            _table.players[0] != address(0) && _table.players[1] != address(0),
-            "Not enough players to start"
-        );
+        if (
+            (table.players[0] == address(0)) || (table.players[1] == address(0))
+        ) {
+            revert InvalidAction("Not enough players to start");
+        }
 
         uint256 matchId = uint256(
-            keccak256(
-                abi.encodePacked(_msgSender(), block.timestamp, _table.id)
-            )
+            keccak256(abi.encodePacked(_msgSender(), block.timestamp, table.id))
         );
-        // PlayerPiece[9][10] memory emptyBoard;
-        Position[2][] memory emptyStepList;
+        table.matchId = matchId;
 
-        _table.matchId = matchId;
-        newMatch = Match({
+        // PlayerPiece[9][10] memory emptyBoard;
+        Move[] memory emptyMoveList;
+        PlayerPiece[9][10] memory board = _initBoard();
+        console.log("Constructed board");
+        Match memory newMatch = Match({
             id: matchId,
-            gameMode: _table.gameMode,
-            players: _table.players,
-            stake: _table.stake,
-            timeControl: _table.timeControl,
+            gameMode: table.gameMode,
+            players: table.players,
+            stake: table.stake,
+            timeControl: table.timeControl,
             startTimestamp: block.timestamp,
             endTimestamp: 0,
-            gameStatus: MatchStatus.Started,
-            board: _initBoard(),
-            matchResult: MatchResult(0, MatchResultType.None, 10, 10),
-            steps: emptyStepList
+            matchStatus: MatchStatus.Started,
+            board: board,
+            matchResult: MatchResult(0, 2, MatchResultType.None, 10, 10),
+            moves: emptyMoveList
         });
+        console.log("Constructed match");
 
         matches.push(newMatch);
+        matchIndexes[matchId] = matches.length - 1;
+
+        // TODO: implement token transfer
+
+        emit NewMatchStarted(matchId, table.players);
     }
 
-    function _initBoard() private returns (PlayerPiece[9][10] memory) {
+    function _initBoard()
+        private
+        view
+        returns (PlayerPiece[9][10] memory board)
+    {
         PlayerPiece[9] memory firstRow;
         PlayerPiece[9] memory secondRow;
         PlayerPiece[9] memory thirdRow;
@@ -479,8 +783,6 @@ contract MysteryChineseChess is Ownable {
         PlayerPiece[9] memory eighthRow;
         PlayerPiece[9] memory ninthRow;
         PlayerPiece[9] memory tenthRow;
-
-        PlayerPiece[9][10] memory board;
 
         board[0] = firstRow;
         board[1] = secondRow;
@@ -495,26 +797,33 @@ contract MysteryChineseChess is Ownable {
 
         firstRow[4] = PlayerPiece(RED, Piece.General, true);
         tenthRow[4] = PlayerPiece(BLACK, Piece.General, true);
+        console.log("[_initBoard] Created 10 rows for board");
 
         // Init using random (keccak256... % 15)
         PlayerPiece[15]
             memory redTeam = _generateRandomlyOrderedNonGeneralPieceList(RED);
+        console.log("[_initBoard] Generated order of red pieces");
         PlayerPiece[15]
             memory blackTeam = _generateRandomlyOrderedNonGeneralPieceList(
                 BLACK
             );
+        console.log("[_initBoard] Generated order of black pieces");
 
         // Assign to right positions
         uint8 pieceIndex = 0; // index of both redTeam & blackTeam
 
         // First row of each team
         for (uint8 col = 0; col < 9; col++ >= 0 && pieceIndex++ >= 0) {
-            if (col == 4) continue; // ignore position of General
+            if (col == 4) {
+                pieceIndex--;
+                continue; // ignore position of General
+            }
 
             firstRow[col] = redTeam[pieceIndex];
             tenthRow[col] = blackTeam[pieceIndex];
         }
 
+        console.log("[_initBoard] Assigned pieces to first row of each side");
         // Third row of each team (containing only Cannons originally)
         thirdRow[1] = redTeam[pieceIndex];
         thirdRow[8 - 1] = redTeam[pieceIndex];
@@ -522,22 +831,23 @@ contract MysteryChineseChess is Ownable {
         eighthRow[1] = blackTeam[pieceIndex];
         eighthRow[8 - 1] = blackTeam[pieceIndex];
         pieceIndex++;
+        console.log("[_initBoard] Assigned pieces to third row of each side");
 
         // Fourth row of each team (containing only Soldiers originally)
-        for (uint8 col = 0; col < 9;) {
+        for (uint8 col = 0; col < 9; col += 2) {
             fourthRow[col] = redTeam[pieceIndex];
             seventhRow[col] = blackTeam[pieceIndex];
-            
+
             pieceIndex++;
-            col += 2;
         }
+        console.log("[_initBoard] Assigned pieces to fouth row of each side");
 
         return board;
     }
 
     function _generateRandomlyOrderedNonGeneralPieceList(
         uint8 color
-    ) private returns (PlayerPiece[15] memory) {
+    ) private view returns (PlayerPiece[15] memory) {
         require(
             color == RED || color == BLACK,
             "color must be either RED or BLACK"
@@ -639,16 +949,138 @@ contract MysteryChineseChess is Ownable {
         return true;
     }
 
-    function verifyCheckmate(uint256 matchId ) external payable {
-        // TODO: implement this in next version
+    function verifyCheckmate(
+        uint256 matchId,
+        Move[] memory moves
+    ) external payable joiningMatch(matchId) {
+        Match storage _match = matches[matchIndexes[matchId]];
+        uint8 playerIndex = (_match.players[0] == _msgSender()) ? 0 : 1;
+        // If this value is kept throughout the for loop, the general piece had not been moved any time.
+        Move memory finalMove = moves[moves.length - 1];
+        Position memory defeatedGeneralPosition = finalMove.details.newPosition;
+
+        uint32 fixedElo = 10;
+        uint8 winnerIndex = (defeatedGeneralPosition.y <= 2)
+            ? RED
+            : BLACK;
+
+        MatchResult memory matchResult = MatchResult(
+            winnerIndex,
+            playerIndex,
+            MatchResultType.Checkmate,
+            fixedElo,
+            fixedElo
+        );
+        _match.moves = moves;
+        _match.matchResult = matchResult;
+        _match.matchStatus = MatchStatus.Ended;
+        // _match.moves = moves;
+        players[playerIndexes[_match.players[winnerIndex]]].elo += int32(
+            fixedElo
+        );
+        players[playerIndexes[_match.players[1 - winnerIndex]]].elo -= int32(
+            fixedElo
+        );
+
+        tables[_getPlayer(_msgSender()).tableId].matchId = 0;
+
+        // TODO: implement token transfer
+
+        emit MatchEnded(_match);
     }
 
-    function offerDraw(uint256 matchId) external payable {
-        // TODO: implement this in next version
+    // function offerDraw(uint256 matchId) external joiningMatch(matchId) {
+    //     Match storage _match = matches[matchIndexes[matchId]];
+    //     uint8 playerIndex = (_match.players[0] == _msgSender()) ? 0 : 1;
+    //     Vote[2] memory votes;
+
+    //     drawVotes[matchId] = votes;
+    //     votes[playerIndex] = Vote.Approve;
+
+    //     emit OfferingDraw(matchId, _msgSender());
+    // }
+
+    // function responseDrawOffer(
+    //     uint256 matchId,
+    //     Vote vote,
+    //     Move[] memory moves
+    // ) external joiningMatch(matchId) {
+    //     Match storage _match = matches[matchIndexes[matchId]];
+    //     uint8 playerIndex = (_match.players[0] == _msgSender()) ? 0 : 1;
+    //     // Vote[2] storage votes = d;
+    //     drawVotes[matchId][playerIndex] = vote;
+
+    //     if (vote == Vote.Approve) {
+    //         MatchResult memory matchResult = MatchResult(
+    //             2,
+    //             1 - playerIndex,
+    //             MatchResultType.OfferToDraw,
+    //             0,
+    //             0
+    //         );
+    //         _match.matchResult = matchResult;
+    //         _match.matchStatus = MatchStatus.Ended;
+    //         _match.moves = moves;
+
+    //         tables[_getPlayer(_msgSender()).tableId].matchId = 0;
+
+    //         // TODO: implement token transfer
+
+    //         emit MatchEnded(_match);
+    //         emit ApprovedDrawOffer(matchId, _msgSender()); // similar to event `MatchEnded` in this case
+    //     } else if (vote == Vote.Decline) {
+    //         emit DeclinedDrawOffer(matchId, _msgSender());
+    //     }
+    // }
+
+    function resign(
+        uint256 matchId,
+        Move[] memory moves
+    ) external payable joiningMatch(matchId) {
+        _resign(matchId, moves);
     }
 
-    function resign(uint256 matchId) external payable {
-        // TODO: implement this in next version
-        revert();
+    function _resign(
+        uint256 matchId,
+        Move[] memory moves
+    ) private joiningMatch(matchId) {
+        uint32 fixedElo = 10;
+        Match storage _match = matches[matchIndexes[matchId]];
+        uint8 playerIndex = (_match.players[0] == _msgSender()) ? 0 : 1;
+        uint8 winnerIndex = 1 - playerIndex;
+        MatchResult memory matchResult = MatchResult(
+            winnerIndex,
+            playerIndex,
+            MatchResultType.Resign,
+            fixedElo,
+            fixedElo
+        );
+        _match.matchResult = matchResult;
+        _match.matchStatus = MatchStatus.Ended;
+        _match.moves = moves;
+        players[playerIndexes[_match.players[winnerIndex]]].elo += int32(
+            fixedElo
+        );
+        players[playerIndexes[_match.players[1 - winnerIndex]]].elo -= int32(
+            fixedElo
+        );
+
+        tables[_getPlayer(_msgSender()).tableId].matchId = 0;
+
+        // TODO: implement token transfer
+
+        emit MatchEnded(_match);
+    }
+
+    function resignAndExitTable(
+        uint256 matchId,
+        Move[] memory moves
+    ) external payable joiningMatch(matchId) {
+        console.log("Start resign function");
+        _resign(matchId, moves);
+        console.log("Start exitTable function");
+        console.log(_getPlayer(_msgSender()).playerAddress);
+        console.log(Strings.toString(_getPlayer(_msgSender()).tableId));
+        _exitTable(_getPlayer(_msgSender()).tableId);
     }
 }

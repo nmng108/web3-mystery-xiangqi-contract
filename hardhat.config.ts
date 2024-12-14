@@ -6,7 +6,7 @@ dotenv.config();
 
 const config: HardhatUserConfig = {
   solidity: {
-    version: "0.8.20",
+    version: "0.8.22",
     settings: {
       viaIR: true,
       optimizer: {
@@ -20,6 +20,10 @@ const config: HardhatUserConfig = {
       chainId: 1337,
       blockGasLimit: 0x1d4c2000,
       gasPrice: 0.2,
+      // mining: {
+      //   auto: false,
+      //   interval: 8000
+      // }
     },
     local: {
       url: "http://127.0.0.1:8545",

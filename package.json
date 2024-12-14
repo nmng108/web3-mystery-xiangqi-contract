@@ -1,7 +1,12 @@
 {
   "name": "web3-learn",
   "scripts": {
-    "compile": "solcjs --bin --abi --include-path node_modules/ --base-path ./contracts -o ./contracts contracts/MysteryChineseChess.sol"
+    "solc-compile": "solcjs --bin --abi --include-path node_modules/ --base-path ./contracts -o ./target contracts/MysteryChineseChess.sol",
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "net": "hardhat node",
+    "deploy": "hardhat ignition deploy ignition/modules/MysteryChineseChessDeployment.ts",
+    "he-deploy": "hardhat run scripts/deploy.ts"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.0.2",
