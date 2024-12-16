@@ -6,17 +6,17 @@ import console from 'console';
 async function deploy(name: string, ...params: [string?]) {
   const contractFactory = await ethers.getContractFactory(name);
 
-  return await contractFactory.deploy(...params).then((f) => f.deployed());
+  return await contractFactory.deploy(...params);
 }
 
 async function main() {
-  const [owner] = await ethers.getSigners();
+  // const [owner] = await ethers.getSigners();
   
   console.log(`Deploying a smart contract...`);
 
-  const contract = (await deploy('MysteryChineseChess')).connect(owner);
+  const contract = (await deploy('MysteryChineseChess'));//.connect(owner);
 
-  console.log({ addr: contract.address });
+  console.log({ addr: await contract.getAddress() });
 }
 
 main()

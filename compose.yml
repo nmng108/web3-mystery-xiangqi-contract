@@ -1,0 +1,16 @@
+services:
+  rpc-node:
+    image: w3mx-node:latest
+    ports:
+      - "8545:8545"
+    environment:
+      # RPC_PORT: 8545
+  peer-server:
+    image: peerjs/peerjs-server:latest
+    ports:
+      - 9000:9000
+  # Build and run this after node has run
+  front-end:
+    image: w3mx-fe
+    ports:
+      - 8080:8080

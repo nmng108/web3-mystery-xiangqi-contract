@@ -26,7 +26,7 @@ const config: HardhatUserConfig = {
       // }
     },
     local: {
-      url: "http://127.0.0.1:8545",
+      url: `http://127.0.0.1:${process.env.RPC_PORT || 8545}`,
       chainId: 1337 /*Number("0x539")*/,
       gasPrice: 'auto',
       accounts: [process.env.PRIVATE_KEY || ""],

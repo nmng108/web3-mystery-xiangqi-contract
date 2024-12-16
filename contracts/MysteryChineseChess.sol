@@ -5,7 +5,7 @@ pragma solidity ~0.8.20;
 import "hardhat/console.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
-// import "./StringUtils.library.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract MysteryChineseChess is Ownable {
     /**
@@ -155,6 +155,7 @@ contract MysteryChineseChess is Ownable {
 
     /* State variables */
 
+    IERC20 tokenContract;
     Player[] public players;
     mapping(address => uint256) public playerIndexes; // player's address => player's index
     Table[] public tables;
@@ -265,9 +266,10 @@ contract MysteryChineseChess is Ownable {
 
     /* Constructor & getters */
 
-    constructor() payable Ownable(_msgSender()) {
+    constructor(/*address tokenAddress*/) payable Ownable(_msgSender()) {
         _initialize();
         _initializeOriginalPieces();
+        // tokenContract = IERC20(tokenAddress);
     }
 
     function _initialize() private {
@@ -344,22 +346,22 @@ contract MysteryChineseChess is Ownable {
     /**
      * Create 20 tables
      */
-    function initializeTables() external payable onlyOwner {
-        for (uint8 i = 1; i <= 20; i++) {
-            tables.push(
-                Table(
-                    uint256(i),
-                    GameMode.Rank,
-                    string.concat("Room ", Strings.toString(uint256(i))),
-                    [address(0), address(0)],
-                    0,
-                    0,
-                    0,
-                    0
-                )
-            );
-        }
-    }
+    // function initializeTables() external payable onlyOwner {
+    //     for (uint8 i = 1; i <= 20; i++) {
+    //         tables.push(
+    //             Table(
+    //                 uint256(i),
+    //                 GameMode.Rank,
+    //                 string.concat("Room ", Strings.toString(uint256(i))),
+    //                 [address(0), address(0)],
+    //                 0,
+    //                 0,
+    //                 0,
+    //                 0
+    //             )
+    //         );
+    //     }
+    // }
 
     /* External Views */
 
@@ -477,9 +479,11 @@ contract MysteryChineseChess is Ownable {
         }
 
         uint256 _id = players.length;
-        Player memory _player = Player(_msgSender(), _name, 0, 0);
+        Player memory _player = Player(_msgSender(), _name, 100, 0);
         players.push(_player); // Add player to players array
         playerIndexes[_msgSender()] = _id; // Create player's address - index mapping
+
+        // tokenContract.transferFrom(owner(), _msgSender(), 200);
 
         emit NewPlayer(_player);
     }
@@ -736,6 +740,25 @@ contract MysteryChineseChess is Ownable {
             revert InvalidAction("Not enough players to start");
         }
 
+        // if (tokenContract.balanceOf(table.players[0]) < table.stake) {
+        //     revert InvalidAction("Player at first slot does not have enough tokens!");
+        // }
+
+        // if (tokenContract.balanceOf(table.players[1]) < table.stake) {
+        //     revert InvalidAction("Player at second slot does not have enough tokens!");
+        // }
+
+        // if (tokenContract.allowance(table.players[0], address(this)) < table.stake) {
+        //     revert InvalidAction("Player 0 did not approve enough tokens!");
+        // }
+
+        // if (tokenContract.allowance(table.players[1], address(this)) < table.stake) {
+        //     revert InvalidAction("Player 1 did not approve enough tokens!");
+        // }
+
+        // tokenContract.transferFrom(_msgSender(), address(this), table.stake * 10 ** 18);
+        // tokenContract.transferFrom(_msgSender(), address(this), table.stake * 10 ** 18);
+
         uint256 matchId = uint256(
             keccak256(abi.encodePacked(_msgSender(), block.timestamp, table.id))
         );
@@ -762,8 +785,6 @@ contract MysteryChineseChess is Ownable {
 
         matches.push(newMatch);
         matchIndexes[matchId] = matches.length - 1;
-
-        // TODO: implement token transfer
 
         emit NewMatchStarted(matchId, table.players);
     }
@@ -961,8 +982,8 @@ contract MysteryChineseChess is Ownable {
 
         uint32 fixedElo = 10;
         uint8 winnerIndex = (defeatedGeneralPosition.y <= 2)
-            ? RED
-            : BLACK;
+            ? BLACK
+            : RED;
 
         MatchResult memory matchResult = MatchResult(
             winnerIndex,

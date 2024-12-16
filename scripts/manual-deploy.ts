@@ -9,6 +9,7 @@ dotenv.config();
 // "Manual" deployment using solc.js & ethers.js instead of utilizing hardhat
 const RPC_SERVER_URL: string = "http://127.0.0.1:7545";
 const PRIVATE_KEY: string = process.env.PRIVATE_KEY || "";
+
 async function main() {
     const provider: ethers.JsonRpcProvider = new ethers.JsonRpcProvider(RPC_SERVER_URL);
     const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
